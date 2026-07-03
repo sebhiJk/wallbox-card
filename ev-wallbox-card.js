@@ -1,6 +1,6 @@
 /**
  * EV Wallbox Custom Dashboard Card for Home Assistant
- * Version 2.0 - Separated Graphs, Real Rolling History & Optimistic UI
+ * Version 3.0 - Compact Design, Fixed Plug Logic & 10s Update Sequence
  */
 
 var LitElement = LitElement || Object.getPrototypeOf(customElements.get("ha-panel-lovelace"));
@@ -25,8 +25,7 @@ class EvWallboxCard extends LitElement {
         this._localCharging = null;
         this._localGreen = null;
         this._localStatusText = null;
-        this._chargingTimeout = null;
-        this._greenTimeout = null;
+        this._sequenceTimeout = null;
     }
 
     render() {
@@ -40,15 +39,15 @@ class EvWallboxCard extends LitElement {
         const stateMode = this.hass.states[this.config.charger_mode_status];
 
         // Werte verarbeiten
-        const connectedVal = stateConnected ? stateConnected.state : 'wurde ausgesteckt';
-        const isConnected = connectedVal === 'wurde eingesteckt' || connectedVal === 'on' || connectedVal === 'true';
+        const connectedVal = stateConnected ? stateConnected.state : 'Ausgesteckt';
+        // Flexibler Abgleich auf "Eingesteckt", "on" oder "true"
+        const isConnected = connectedVal.toLowerCase() === 'eingesteckt' || connectedVal === 'on' || connectedVal === 'true';
         
         const energyVal = stateEnergy ? parseFloat(stateEnergy.state) : 0;
         const powerVal = statePower ? parseFloat(statePower.state) : 0;
 
-        // Rolling History für den Signal-Graphen verwalten (Verhindert das sofortige Füllen)
+        // Rolling History für den Leistungsgraphen
         if (this._powerHistory.length === 0) {
-            // Mit flacher Linie auf aktuellem Wert initialisieren
             for (let i = 0; i < 40; i++) this._powerHistory.push(powerVal);
         } else {
             const lastPoint = this._powerHistory[this._powerHistory.length - 1];
@@ -58,7 +57,7 @@ class EvWallboxCard extends LitElement {
             }
         }
 
-        // EV Modus auswerten (PV Power = Eco / Normal Charge = Full Power) mit lokalem Override
+        // EV Modus auswerten (PV Power = Eco) mit lokalem Override
         let isGreenActive = stateMode ? (stateMode.state === 'PV Power') : false;
         if (this._localGreen !== null) {
             isGreenActive = this._localGreen;
@@ -70,7 +69,7 @@ class EvWallboxCard extends LitElement {
             isCharging = this._localCharging;
         }
 
-        // Status-Text auswerten mit lokalem Override ("Command send")
+        // Status-Text auswerten mit lokalem Override
         let statusText = stateStatus ? stateStatus.state : 'Standby';
         if (this._localStatusText !== null) {
             statusText = this._localStatusText;
@@ -88,17 +87,17 @@ class EvWallboxCard extends LitElement {
         return html`
             <ha-card class="wallbox-card">
 
-                <!-- ZEILE 1: Getrennter Liniengraph (Leistung) mit Wert am Ende -->
+                <!-- ZEILE 1: Getrennter Liniengraph (Leistung) -->
                 <div class="graph-track">
                     <div class="line-graph-container">
                         <svg viewBox="0 0 500 60" preserveAspectRatio="none" class="history-svg">
-                            <path d="${this._generateHistoryPath(this._powerHistory, maxPower)}" fill="none" stroke="${isCharging ? '#64b5f6' : 'rgba(255, 255, 255, 0.2)'}" stroke-width="2.5" />
+                            <path d="${this._generateHistoryPath(this._powerHistory, maxPower)}" fill="none" stroke="${isCharging ? '#4caf50' : 'rgba(255, 255, 255, 0.2)'}" stroke-width="2.5" />
                         </svg>
                     </div>
                     <div class="graph-value-label">${powerVal.toFixed(1).replace('.', ',')} kW</div>
                 </div>
 
-                <!-- ZEILE 2: Schmalerer Bargraph (Geladene Menge) mit Wert am Ende -->
+                <!-- ZEILE 2: Schmaler Bargraph (Prozente / kWh) -->
                 <div class="graph-track">
                     <div class="bar-graph-container">
                         <div class="bar-fill" style="width: ${pct}%;"></div>
@@ -122,23 +121,23 @@ class EvWallboxCard extends LitElement {
                 <!-- Steuerungs-Buttons & Text-Status -->
                 <div class="controls-row">
                     <div class="pill-buttons-group">
-                        <!-- Stecker Status -->
-                        <button class="btn-pill ${isConnected ? 'connected' : 'disconnected'}">
+                        <!-- Stecker Status Button (Löst bei Klick ebenfalls die Aktualisierung aus) -->
+                        <button class="btn-pill ${isConnected ? 'connected' : 'disconnected'}" @click=${() => this._handleButtonPress('plug')}>
                             <ha-icon icon="${isConnected ? 'mdi:ev-plug-type2' : 'mdi:power-plug-off'}"></ha-icon>
                         </button>
 
-                        <!-- EV Modus Toggle (Wechselt basierend auf PV Power / Normal Charge) -->
-                        <button class="btn-pill mode-toggle ${isGreenActive ? 'eco' : 'full-power'}" @click=${() => this._toggleGreenPower(isGreenActive)}>
+                        <!-- EV Modus Toggle -->
+                        <button class="btn-pill mode-toggle ${isGreenActive ? 'eco' : 'full-power'}" @click=${() => this._handleButtonPress('mode', isGreenActive)}>
                             <ha-icon icon="${isGreenActive ? 'mdi:leaf' : 'mdi:leaf-off'}"></ha-icon>
                         </button>
 
                         <!-- Start / Stop Laden -->
-                        <button class="btn-pill action-toggle ${isCharging ? 'charging' : 'idle'}" @click=${() => this._toggleCharge(isCharging)}>
+                        <button class="btn-pill action-toggle ${isCharging ? 'charging' : 'idle'}" @click=${() => this._handleButtonPress('charge', isCharging)}>
                             <ha-icon icon="${isCharging ? 'mdi:stop' : 'mdi:play'}"></ha-icon>
                         </button>
                     </div>
 
-                    <!-- Arbeitsstatus (Live oder temporär "Command send") -->
+                    <!-- Arbeitsstatus (Rechtsbündig, kleiner & mit Abstand) -->
                     <div class="status-label-container">
                         <span class="status-text">${statusText}</span>
                     </div>
@@ -147,7 +146,7 @@ class EvWallboxCard extends LitElement {
         `;
     }
 
-    // Erzeugt einen echten, fortlaufenden Signal-Pfad im SVG
+    // Erzeugt den Signal-Pfad im SVG
     _generateHistoryPath(history, maxPower) {
         if (!history || history.length < 2) return 'M 0,55 L 500,55';
         const width = 500;
@@ -165,48 +164,58 @@ class EvWallboxCard extends LitElement {
         return `M ${points.join(' L ')}`;
     }
 
-    // Sofortiges optisches Feedback + Senden für Green Power Modus
-    _toggleGreenPower(isGreenActive) {
-        const serviceEntity = isGreenActive ? this.config.button_disable_green_power : this.config.button_enable_green_power;
-        if (!serviceEntity) return;
-        
-        // Optimistic UI: Zustand sofort lokal erzwingen
-        this._localGreen = !isGreenActive;
+    // Zentrale Steuerungs-Sequenz für alle Buttons inkl. 10s Update-Verzögerung
+    _handleButtonPress(type, currentState) {
+        // 1. Optisches Sofort-Feedback & "Command send" setzen
         this._localStatusText = "Command send";
         
-        if (this._greenTimeout) clearTimeout(this._greenTimeout);
-        this._greenTimeout = setTimeout(() => {
-            this._localGreen = null;
-            this._localStatusText = null;
-            this.requestUpdate();
-        }, 30000); // 30 Sekunden Haltezeit für träge Signale
+        if (type === 'mode') {
+            this._localGreen = !currentState;
+            const serviceEntity = currentState ? this.config.button_disable_green_power : this.config.button_enable_green_power;
+            this._callHomeAssistantService(serviceEntity);
+        } 
+        else if (type === 'charge') {
+            this._localCharging = !currentState;
+            const serviceEntity = currentState ? this.config.button_stop_charge : this.config.button_start_charge;
+            this._callHomeAssistantService(serviceEntity);
+        }
 
-        const domain = serviceEntity.split('.')[0];
-        const service = domain === 'button' ? 'press' : 'turn_on';
-        this.hass.callService(domain, service, { entity_id: serviceEntity });
+        // 2. Zeitsteuerung für die 10 Sekunden Sequenz aktivieren
+        if (this._sequenceTimeout) clearTimeout(this._sequenceTimeout);
+        
+        this._sequenceTimeout = setTimeout(() => {
+            // Alle in der Card verwendeten Entitäten ermitteln
+            const entitiesToUpdate = [
+                this.config.charger_connected,
+                this.config.charger_energy,
+                this.config.charger_power,
+                this.config.charger_status,
+                this.config.charger_mode_status
+            ].filter(Boolean);
+
+            // Home Assistant zwingen, alle Sensoren JETZT frisch abzufragen
+            entitiesToUpdate.forEach(entity => {
+                this.hass.callService('homeassistant', 'update_entity', { entity_id: entity });
+            });
+
+            // Lokale Overrides nach dem Update wieder freigeben, damit Echtwerte gelten
+            setTimeout(() => {
+                this._localCharging = null;
+                this._localGreen = null;
+                this._localStatusText = null;
+                this.requestUpdate();
+            }, 2000); // Kleine Pufferzeit, damit HA die Werte verarbeitet hat
+
+        }, 10000); // Exakt 10 Sekunden Verzögerung
+
         this.requestUpdate();
     }
 
-    // Sofortiges optisches Feedback + Senden für Laden Start/Stop
-    _toggleCharge(isCharging) {
-        const serviceEntity = isCharging ? this.config.button_stop_charge : this.config.button_start_charge;
+    _callHomeAssistantService(serviceEntity) {
         if (!serviceEntity) return;
-
-        // Optimistic UI: Zustand sofort lokal erzwingen
-        this._localCharging = !isCharging;
-        this._localStatusText = "Command send";
-
-        if (this._chargingTimeout) clearTimeout(this._chargingTimeout);
-        this._chargingTimeout = setTimeout(() => {
-            this._localCharging = null;
-            this._localStatusText = null;
-            this.requestUpdate();
-        }, 30000);
-
         const domain = serviceEntity.split('.')[0];
         const service = domain === 'button' ? 'press' : 'turn_on';
         this.hass.callService(domain, service, { entity_id: serviceEntity });
-        this.requestUpdate();
     }
 
     setConfig(config) {
@@ -227,11 +236,11 @@ class EvWallboxCard extends LitElement {
             }
             .wallbox-card {
                 background: linear-gradient(145deg, #1e242c, #12161a);
-                border-radius: 24px;
-                padding: 24px;
+                border-radius: 18px;
+                padding: 12px; /* Reduzierter Abstand zum Außenrand laut Bild */
                 color: #ffffff;
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-                box-shadow: 0 12px 24px rgba(0,0,0,0.4);
+                box-shadow: 0 8px 20px rgba(0,0,0,0.4);
                 border: 1px solid rgba(255,255,255,0.05);
             }
 
@@ -239,14 +248,14 @@ class EvWallboxCard extends LitElement {
             .graph-track {
                 display: flex;
                 align-items: center;
-                gap: 16px;
-                margin-bottom: 14px;
+                gap: 12px;
+                margin-bottom: 8px; /* Kompaktisierte Abstände */
             }
 
             .line-graph-container {
                 flex: 1;
-                height: 60px;
-                border-radius: 14px;
+                height: 55px;
+                border-radius: 10px;
                 overflow: hidden;
                 background: rgba(255, 255, 255, 0.01);
                 border: 1px solid rgba(255, 255, 255, 0.03);
@@ -258,8 +267,8 @@ class EvWallboxCard extends LitElement {
 
             .bar-graph-container {
                 flex: 1;
-                height: 20px;
-                border-radius: 8px;
+                height: 16px;
+                border-radius: 6px;
                 overflow: hidden;
                 background: rgba(255, 255, 255, 0.02);
                 border: 1px solid rgba(255, 255, 255, 0.04);
@@ -267,14 +276,14 @@ class EvWallboxCard extends LitElement {
             .bar-fill {
                 height: 100%;
                 background: linear-gradient(90deg, #4caf50, #81c784);
-                box-shadow: 0 0 15px rgba(76, 175, 80, 0.3);
+                box-shadow: 0 0 12px rgba(76, 175, 80, 0.3);
                 transition: width 0.5s ease;
             }
 
             .graph-value-label {
-                width: 75px;
+                width: 65px;
                 text-align: right;
-                font-size: 14px;
+                font-size: 13px;
                 font-weight: 600;
                 color: rgba(255, 255, 255, 0.9);
                 font-variant-numeric: tabular-nums;
@@ -285,61 +294,80 @@ class EvWallboxCard extends LitElement {
                 display: flex;
                 justify-content: space-between;
                 align-items: flex-end;
-                margin-bottom: 24px;
-                margin-top: 10px;
-                padding: 0 4px;
+                margin-bottom: 14px;
+                margin-top: 6px;
+                padding: 0 2px;
             }
             .primary-metrics {
                 display: flex;
                 align-items: baseline;
             }
-            .value-large { font-size: 42px; font-weight: 400; line-height: 1; }
-            .unit-large { font-size: 18px; color: rgba(255, 255, 255, 0.6); margin-left: 6px; margin-right: 12px; }
-            .separator { font-size: 24px; color: rgba(255, 255, 255, 0.2); margin-right: 12px; }
-            .value-percent { font-size: 24px; font-weight: 300; color: rgba(255, 255, 255, 0.6); }
-            .secondary-metrics { font-size: 11px; font-weight: 600; color: rgba(255, 255, 255, 0.3); letter-spacing: 0.5px; padding-bottom: 6px; }
+            .value-large { font-size: 36px; font-weight: 400; line-height: 1; }
+            .unit-large { font-size: 16px; color: rgba(255, 255, 255, 0.6); margin-left: 4px; margin-right: 10px; }
+            .separator { font-size: 20px; color: rgba(255, 255, 255, 0.2); margin-right: 10px; }
+            .value-percent { font-size: 20px; font-weight: 300; color: rgba(255, 255, 255, 0.6); }
+            .secondary-metrics { font-size: 11px; font-weight: 600; color: rgba(255, 255, 255, 0.25); letter-spacing: 0.5px; padding-bottom: 4px; }
 
-            /* Controls & Klick-Feedback */
+            /* Controls Row & Buttons */
             .controls-row {
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
-                padding: 0 4px;
+                padding: 0 2px;
+                gap: 16px; /* Garantiert Abstand zwischen Buttons und Text */
             }
             .pill-buttons-group {
                 display: flex;
-                gap: 12px;
+                gap: 10px;
+                flex-shrink: 0; /* Verhindert, dass Buttons kleiner geschoben werden */
             }
             .btn-pill {
                 background: rgba(255, 255, 255, 0.05);
                 border: 1px solid rgba(255, 255, 255, 0.1);
-                border-radius: 20px;
-                padding: 8px 24px;
+                border-radius: 18px;
+                padding: 6px 20px;
                 color: #ffffff;
                 cursor: pointer;
                 display: flex;
                 align-items: center;
                 justify-content: center;
                 transition: all 0.1s ease;
-                min-width: 70px;
-                height: 38px;
+                min-width: 65px;
+                height: 36px;
             }
             
-            /* Klick-Feedback Simulation */
+            /* Deutliches visuelles Klick-Feedback */
             .btn-pill:active {
-                transform: scale(0.90);
-                background: rgba(255, 255, 255, 0.25) !important;
-                box-shadow: inset 0 2px 4px rgba(0,0,0,0.4);
+                transform: scale(0.92);
+                background: rgba(255, 255, 255, 0.3) !important;
+                border-color: rgba(255, 255, 255, 0.5) !important;
+                box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
             }
 
-            .btn-pill.connected { background: rgba(76, 175, 80, 0.2); border-color: rgba(76, 175, 80, 0.4); color: #81c784; }
+            /* Farbstile für die Zustände */
+            .btn-pill.connected { background: rgba(76, 175, 80, 0.2); border-color: rgba(76, 175, 80, 0.45); color: #81c784; }
             .btn-pill.disconnected { background: rgba(255, 255, 255, 0.02); border-color: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.3); }
-            .btn-pill.eco { background: rgba(76, 175, 80, 0.2); border-color: rgba(76, 175, 80, 0.4); color: #81c784; }
-            .btn-pill.full-power { background: rgba(33, 150, 243, 0.2); border-color: rgba(33, 150, 243, 0.4); color: #64b5f6; }
-            .btn-pill.charging { background: rgba(255, 167, 38, 0.2); border-color: rgba(255, 167, 38, 0.4); color: #ffb74d; }
+            .btn-pill.eco { background: rgba(76, 175, 80, 0.2); border-color: rgba(76, 175, 80, 0.45); color: #81c784; }
+            .btn-pill.full-power { background: rgba(33, 150, 243, 0.2); border-color: rgba(33, 150, 243, 0.45); color: #64b5f6; }
+            .btn-pill.charging { background: rgba(255, 167, 38, 0.2); border-color: rgba(255, 167, 38, 0.45); color: #ffb74d; }
             
-            .status-label-container { display: flex; align-items: center; }
-            .status-text { font-size: 20px; font-weight: 400; color: rgba(255, 255, 255, 0.85); letter-spacing: 0.5px; }
+            /* Status Text Styling */
+            .status-label-container { 
+                display: flex; 
+                align-items: center; 
+                justify-content: flex-end;
+                flex: 1;
+                min-width: 0;
+            }
+            .status-text { 
+                font-size: 14px; /* Kleinerer Text laut Wunsch */
+                font-weight: 500; 
+                color: rgba(255, 255, 255, 0.7); 
+                letter-spacing: 0.3px;
+                text-align: right;
+                line-height: 1.3;
+                word-break: break-word; /* Verhindert das Herausragen bei engen Screens */
+            }
         `;
     }
 }
