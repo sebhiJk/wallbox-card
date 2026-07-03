@@ -1,6 +1,6 @@
 /**
  * EV Wallbox Custom Dashboard Card for Home Assistant
- * Designed to match the high-end UI shown in 1000017650.png
+ * Designed to match the high-end UI shown in 1000017650.png / 1000017652.png
  */
 
 var LitElement = LitElement || Object.getPrototypeOf(customElements.get("ha-panel-lovelace"));
@@ -36,9 +36,10 @@ class EvWallboxCard extends LitElement {
         // Eco Modus Status überprüfen
         const isGreenActive = stateGreenPower ? (stateGreenPower.state === 'on' || stateGreenPower.state === 'true' || stateGreenPower.state === 'enabled') : false;
 
-        // Fahrzeug-Grenzwerte aus der Konfiguration holen
+        // Konfigurations-Grenzwerte holen (Auto & Wallbox)
         const maxCapacity = parseFloat(this.config.max_capacity) || 77;
         const maxReach = parseFloat(this.config.max_reach) || 500;
+        const maxPower = parseFloat(this.config.max_power) || 11; // Neues dynamisches Limit für die Leistungskurve
 
         // Berechnungen für den Graphen und die Reichweite
         const pct = Math.min(100, Math.max(0, (energyVal / maxCapacity) * 100));
@@ -49,12 +50,6 @@ class EvWallboxCard extends LitElement {
 
         return html`
             <ha-card class="wallbox-card">
-                <!-- Top Tabs Navigation passend zum Bild-Design -->
-                <div class="tabs-header">
-                    <span class="tab-item">CHARGING</span>
-                    <span class="tab-item active">POWER SHARING</span>
-                    <span class="tab-item">HISTORY</span>
-                </div>
 
                 <!-- Haupt-Bargraph mit Ladefortschritt -->
                 <div class="graph-container">
@@ -62,13 +57,16 @@ class EvWallboxCard extends LitElement {
                         <div class="progress-bar-fill" style="width: ${pct}%;"></div>
                     </div>
                     
-                    <!-- SVG Overlay-Kurve für die aktuelle Ladeleistung (kW) -->
+                    <!-- SVG Overlay-Kurve skaliert anhand von maxPower -->
                     <svg class="power-curve-svg" viewBox="0 0 600 120" preserveAspectRatio="none">
-                        <path d="${this._generateWavePath(powerVal)}" fill="none" stroke="rgba(255, 255, 255, 0.5)" stroke-width="2.5" />
-                        <!-- Dekorative Messpunkte auf der Kurve -->
-                        <circle cx="200" cy="${this._getWaveY(200, powerVal)}" r="4" fill="rgba(255,255,255,0.4)" />
-                        <circle cx="350" cy="${this._getWaveY(350, powerVal)}" r="5" fill="#66bb6a" />
-                        <circle cx="480" cy="${this._getWaveY(480, powerVal)}" r="3" fill="rgba(255,255,255,0.4)" />
+                        <path d="${this._generateWavePath(powerVal, maxPower)}" fill="none" stroke="${isCharging ? 'rgba(255, 255, 255, 0.6)' : 'rgba(255, 255, 255, 0.15)'}" stroke-width="2.5" />
+                        
+                        <!-- Messpunkte bauen sich nur auf/leuchten, wenn aktiv geladen wird -->
+                        ${isCharging ? html`
+                            <circle cx="200" cy="${this._getWaveY(200, powerVal, maxPower)}" r="4" fill="rgba(255,255,255,0.4)" />
+                            <circle cx="350" cy="${this._getWaveY(350, powerVal, maxPower)}" r="5" fill="#66bb6a" />
+                            <circle cx="480" cy="${this._getWaveY(480, powerVal, maxPower)}" r="3" fill="rgba(255,255,255,0.4)" />
+                        ` : ''}
                     </svg>
                 </div>
 
@@ -113,20 +111,43 @@ class EvWallboxCard extends LitElement {
         `;
     }
 
-    // Generiert die dynamische S-Kurve basierend auf der kW-Leistung
-    _generateWavePath(power) {
-        const amplitude = Math.min(40, power * 2);
-        const baseHeight = 70;
-        return `M 0,${baseHeight + 10} C 150,${baseHeight + 10} 250,${baseHeight - amplitude} 400,${baseHeight - amplitude} C 500,${baseHeight - amplitude} 550,${baseHeight - 15} 600,${baseHeight - 20}`;
+    // Generiert die S-Kurve basierend auf kW-Leistung und maxPower (Höhenlimit)
+    _generateWavePath(power, maxPower) {
+        const floorY = 105; // Bodenlinie des Graphen
+        const ceilingY = 25; // Die Kurve steigt maximal bis Y=25 (nahe dem oberen Rand des Graphen)
+        const maxAmplitude = floorY - ceilingY; // Maximaler Spielraum für den Ausschlag (80px)
+
+        if (power <= 0.1) {
+            return `M 0,${floorY} L 600,${floorY}`; // Flache Linie am Boden bei 0 kW
+        }
+        
+        // Verhältnis der aktuellen Leistung zur maximalen Leistung (Wert zwischen 0 und 1)
+        const normalizedPower = Math.min(1, power / maxPower); 
+        
+        // Dynamische Y-Punkte berechnen
+        const startY = floorY;
+        const midY = floorY - (normalizedPower * (maxAmplitude * 0.6));
+        const endY = floorY - (normalizedPower * maxAmplitude);
+        
+        return `M 0,${startY} C 150,${startY} 250,${midY} 400,${midY} C 500,${midY} 550,${endY} 600,${endY}`;
     }
 
-    // Berechnet die Y-Punkte für die runden Punkte auf der Kurve
-    _getWaveY(x, power) {
-        const amplitude = Math.min(40, power * 2);
-        const baseHeight = 70;
-        if (x < 300) return baseHeight + 5;
-        if (x < 450) return baseHeight - amplitude;
-        return baseHeight - 15;
+    // Berechnet exakt synchrone Y-Punkte für die runden Punkte auf der Kurve
+    _getWaveY(x, power, maxPower) {
+        const floorY = 105;
+        const ceilingY = 25;
+        const maxAmplitude = floorY - ceilingY;
+
+        if (power <= 0.1) return floorY;
+        
+        const normalizedPower = Math.min(1, power / maxPower);
+        const startY = floorY;
+        const midY = floorY - (normalizedPower * (maxAmplitude * 0.6));
+        const endY = floorY - (normalizedPower * maxAmplitude);
+        
+        if (x < 220) return startY;
+        if (x < 420) return midY;
+        return endY;
     }
 
     // Steuerung des Eco-Modus über Buttons
@@ -162,9 +183,8 @@ class EvWallboxCard extends LitElement {
 
     static get styles() {
         return css`
-            :host {
-                display: block;
-            }
+            /* (Die Styles bleiben identisch zur vorherigen Version) */
+            :host { display: block; }
             .wallbox-card {
                 background: linear-gradient(145deg, #1e242c, #12161a);
                 border-radius: 24px;
@@ -174,172 +194,47 @@ class EvWallboxCard extends LitElement {
                 box-shadow: 0 12px 24px rgba(0,0,0,0.4);
                 border: 1px solid rgba(255,255,255,0.05);
             }
-            
-            .tabs-header {
-                display: flex;
-                gap: 24px;
-                margin-bottom: 24px;
-                border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-                padding-bottom: 8px;
-            }
-            .tab-item {
-                font-size: 12px;
-                font-weight: 700;
-                color: rgba(255, 255, 255, 0.4);
-                letter-spacing: 1px;
-            }
-            .tab-item.active {
-                color: #ffffff;
-                position: relative;
-            }
-            .tab-item.active::after {
-                content: '';
-                position: absolute;
-                bottom: -9px;
-                left: 0;
-                width: 100%;
-                height: 2px;
-                background-color: #ffa726;
-            }
-
             .graph-container {
                 position: relative;
                 width: 100%;
-                height: 100px;
+                height: 115px;
                 border-radius: 16px;
                 overflow: hidden;
                 margin-bottom: 20px;
-                background: rgba(255, 255, 255, 0.04);
-                border: 1px solid rgba(255, 255, 255, 0.05);
+                background: rgba(255, 255, 255, 0.02);
+                border: 1px solid rgba(255, 255, 255, 0.04);
             }
-            .progress-bar-bg {
-                width: 100%;
-                height: 100%;
-                background: rgba(46, 125, 50, 0.15);
-            }
+            .progress-bar-bg { width: 100%; height: 100%; background: rgba(46, 125, 50, 0.08); }
             .progress-bar-fill {
                 height: 100%;
                 background: linear-gradient(90deg, #4caf50, #81c784);
-                box-shadow: 0 0 20px rgba(76, 175, 80, 0.6);
+                box-shadow: 0 0 20px rgba(76, 175, 80, 0.4);
                 border-right: 2px solid #a5d6a7;
                 transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
             }
-            .power-curve-svg {
-                position: absolute;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
-                pointer-events: none;
-            }
-
-            .metrics-container {
-                display: flex;
-                justify-content: space-between;
-                align-items: flex-end;
-                margin-bottom: 28px;
-                padding: 0 4px;
-            }
-            .primary-metrics {
-                display: flex;
-                align-items: baseline;
-            }
-            .value-large {
-                font-size: 42px;
-                font-weight: 400;
-                color: #ffffff;
-                line-height: 1;
-            }
-            .unit-large {
-                font-size: 18px;
-                color: rgba(255, 255, 255, 0.6);
-                margin-left: 6px;
-                margin-right: 12px;
-            }
-            .separator {
-                font-size: 24px;
-                color: rgba(255, 255, 255, 0.2);
-                margin-right: 12px;
-            }
-            .value-percent {
-                font-size: 24px;
-                font-weight: 300;
-                color: rgba(255, 255, 255, 0.6);
-            }
-            .secondary-metrics {
-                font-size: 12px;
-                font-weight: 600;
-                color: rgba(255, 255, 255, 0.3);
-                letter-spacing: 0.5px;
-                padding-bottom: 6px;
-            }
-
-            .controls-row {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                padding: 0 4px;
-            }
-            .pill-buttons-group {
-                display: flex;
-                gap: 12px;
-            }
+            .power-curve-svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+            .metrics-container { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 28px; padding: 0 4px; }
+            .primary-metrics { display: flex; align-items: baseline; }
+            .value-large { font-size: 42px; font-weight: 400; color: #ffffff; line-height: 1; }
+            .unit-large { font-size: 18px; color: rgba(255, 255, 255, 0.6); margin-left: 6px; margin-right: 12px; }
+            .separator { font-size: 24px; color: rgba(255, 255, 255, 0.2); margin-right: 12px; }
+            .value-percent { font-size: 24px; font-weight: 300; color: rgba(255, 255, 255, 0.6); }
+            .secondary-metrics { font-size: 12px; font-weight: 600; color: rgba(255, 255, 255, 0.3); letter-spacing: 0.5px; padding-bottom: 6px; }
+            .controls-row { display: flex; justify-content: space-between; align-items: center; padding: 0 4px; }
+            .pill-buttons-group { display: flex; gap: 12px; }
             .btn-pill {
-                background: rgba(255, 255, 255, 0.05);
-                border: 1px solid rgba(255, 255, 255, 0.1);
-                border-radius: 20px;
-                padding: 8px 24px;
-                color: #ffffff;
-                cursor: pointer;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                transition: all 0.3s ease;
-                min-width: 70px;
-                height: 38px;
+                background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 20px;
+                padding: 8px 24px; color: #ffffff; cursor: pointer; display: flex; align-items: center; justify-content: center;
+                transition: all 0.3s ease; min-width: 70px; height: 38px;
             }
-            .btn-pill:hover {
-                background: rgba(255, 255, 255, 0.1);
-            }
-            
-            .btn-pill.connected {
-                background: rgba(76, 175, 80, 0.2);
-                border-color: rgba(76, 175, 80, 0.4);
-                color: #81c784;
-            }
-            .btn-pill.disconnected {
-                background: rgba(255, 255, 255, 0.02);
-                border-color: rgba(255, 255, 255, 0.05);
-                color: rgba(255, 255, 255, 0.3);
-            }
-            .btn-pill.eco {
-                background: rgba(76, 175, 80, 0.2);
-                border-color: rgba(76, 175, 80, 0.4);
-                color: #81c784;
-            }
-            .btn-pill.full-power {
-                background: rgba(33, 150, 243, 0.2);
-                border-color: rgba(33, 150, 243, 0.4);
-                color: #64b5f6;
-            }
-            .btn-pill.charging {
-                background: rgba(255, 167, 38, 0.2);
-                border-color: rgba(255, 167, 38, 0.4);
-                color: #ffb74d;
-                animation: pulse-border 2s infinite;
-            }
-            
-            .status-label-container {
-                display: flex;
-                align-items: center;
-            }
-            .status-text {
-                font-size: 20px;
-                font-weight: 400;
-                color: rgba(255, 255, 255, 0.85);
-                letter-spacing: 0.5px;
-            }
-
+            .btn-pill:hover { background: rgba(255, 255, 255, 0.1); }
+            .btn-pill.connected { background: rgba(76, 175, 80, 0.2); border-color: rgba(76, 175, 80, 0.4); color: #81c784; }
+            .btn-pill.disconnected { background: rgba(255, 255, 255, 0.02); border-color: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.3); }
+            .btn-pill.eco { background: rgba(76, 175, 80, 0.2); border-color: rgba(76, 175, 80, 0.4); color: #81c784; }
+            .btn-pill.full-power { background: rgba(33, 150, 243, 0.2); border-color: rgba(33, 150, 243, 0.4); color: #64b5f6; }
+            .btn-pill.charging { background: rgba(255, 167, 38, 0.2); border-color: rgba(255, 167, 38, 0.4); color: #ffb74d; animation: pulse-border 2s infinite; }
+            .status-label-container { display: flex; align-items: center; }
+            .status-text { font-size: 20px; font-weight: 400; color: rgba(255, 255, 255, 0.85); letter-spacing: 0.5px; }
             @keyframes pulse-border {
                 0% { border-color: rgba(255, 167, 38, 0.4); }
                 50% { border-color: rgba(255, 167, 38, 0.8); }
